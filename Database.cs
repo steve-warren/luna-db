@@ -1,5 +1,8 @@
+using System.Buffers;
+using System.Data.Common;
 using LunaDB.Buffers;
 using Microsoft.Win32.SafeHandles;
+using System.IO.Pipelines;
 
 namespace LunaDB;
 
@@ -7,14 +10,15 @@ public sealed class Database(SafeFileHandle fileHandle) : IDisposable
 {
     public static Database Open(string path)
     {
+        File.Delete(path);
+
         return new Database(
             File.OpenHandle(
                 path: path,
-                mode: FileMode.Create,
+                mode: FileMode.CreateNew,
                 access: FileAccess.ReadWrite,
                 share: FileShare.None,
-                options: FileOptions.None,
-                preallocationSize: 64 * 1024
+                options: FileOptions.Asynchronous
             )
         );
     }
@@ -55,40 +59,93 @@ public sealed class Database(SafeFileHandle fileHandle) : IDisposable
         RandomAccess.FlushToDisk(fileHandle);
     }
 
-    public record Document(int Id, Memory<byte> Data);
+    public record Document(int Id, ReadOnlyMemory<byte> Data);
 
-    public IEnumerable<Document> Scan()
+    private async Task FillPipeAsync(PipeWriter writer)
     {
-        const int SixtyFourKibibytes = 64 * 1024;
+        var totalBytesRead = 0L;
 
-        var buffer = new byte[SixtyFourKibibytes];
-
-        var bytesRead = RandomAccess.Read(fileHandle, [buffer], 0);
-
-        Console.WriteLine("loaded " + bytesRead + " bytes into 64 KiB buffer");
-
-        var slice = buffer.AsMemory(0, (int) bytesRead);
-        var consumedBytes = 0;
-
-        while (consumedBytes < bytesRead)
+        while (true)
         {
-            var documentSlice = slice[consumedBytes..];
+            var memory = writer.GetMemory(64 * 1024);
 
-            var document = ReadDocument(documentSlice);
-            consumedBytes += 4 + 2 + document.Data.Length;
+            var bytesRead = (int) await RandomAccess.ReadAsync(fileHandle, [memory], totalBytesRead);
+            
+            if (bytesRead == 0)
+                break;
 
-            yield return document;
+            totalBytesRead += bytesRead;
+            
+            writer.Advance(bytesRead);
 
-            Console.WriteLine("consumed " + consumedBytes + " bytes");
+            var result = await writer.FlushAsync();
+
+            if (result.IsCompleted)
+                break;
         }
+
+        await writer.CompleteAsync();
     }
 
-    private static Document ReadDocument(Memory<byte> documentSlice)
+    private async IAsyncEnumerable<Document> ReadFromPipe(PipeReader reader)
     {
-        var span = documentSlice.Span;
-        var id = BinaryPrimitives.ReadInt32(span[..4]);
-        var dataLength = BinaryPrimitives.ReadInt16(span[4..6]);
-        var data = documentSlice.Slice(6, dataLength);
-        return new Document(id, data);
+        while (true)
+        {
+            var result = await reader.ReadAsync();
+            var buffer = result.Buffer;
+
+            while (TryReadDocument(ref buffer, out var document))
+                yield return document!;
+
+            reader.AdvanceTo(buffer.Start, buffer.End);
+
+            if (result.IsCompleted)
+            {
+                break;
+            }
+        }
+
+        await reader.CompleteAsync();
+    }
+
+    private static bool TryReadDocument(ref ReadOnlySequence<byte> buffer, out Document? document)
+    {
+        var reader = new SequenceReader<byte>(buffer);
+
+        if (!reader.TryReadLittleEndian(out int id) ||
+            !reader.TryReadLittleEndian(out short length))
+        {
+            document = null;
+            return false;
+        }
+
+        // Check if the buffer contains the entire record
+        if (reader.Remaining < length)
+        {
+            document = null;
+            return false;
+        }
+
+        // Read the record data
+        var recordSlice = buffer.Slice(reader.Position, length);
+        
+        document = new Document(Id: id, Data: recordSlice.First);
+
+        // Move the buffer past the record
+        buffer = buffer.Slice(recordSlice.End);
+
+        return true;
+    }
+
+    public async IAsyncEnumerable<Document> ScanAsync()
+    {
+        var pipe = new Pipe();
+
+        var writing = FillPipeAsync(pipe.Writer);
+
+        await foreach (var document in ReadFromPipe(pipe.Reader))
+            yield return document;
+
+        await writing;
     }
 }
