@@ -21,8 +21,15 @@ public static class BinaryPrimitives
         MemoryMarshal.Write<int>(destination, in value);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteInt64(Span<byte> destionation, long value) =>
+        MemoryMarshal.Write<long>(destionation, in value);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static short ReadInt16(Span<byte> source) => MemoryMarshal.Read<short>(source);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int ReadInt32(Span<byte> source) => MemoryMarshal.Read<int>(source);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static long ReadInt64(Span<byte> source) => MemoryMarshal.Read<long>(source);
 }

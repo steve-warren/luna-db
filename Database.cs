@@ -1,19 +1,27 @@
 using System.Buffers;
+using System.IO.Pipelines;
 using LunaDB.Buffers;
 using Microsoft.Win32.SafeHandles;
-using System.IO.Pipelines;
 
 namespace LunaDB;
 
-public sealed class Database(SafeFileHandle fileHandle) : IDisposable
+public sealed class Database(SafeFileHandle fileHandle, SafeFileHandle indexHandle) : IDisposable
 {
     public static Database Open(string path)
     {
         File.Delete(path);
+        File.Delete("idx");
 
         return new Database(
             File.OpenHandle(
                 path: path,
+                mode: FileMode.CreateNew,
+                access: FileAccess.ReadWrite,
+                share: FileShare.None,
+                options: FileOptions.Asynchronous
+            ),
+            File.OpenHandle(
+                path: "idx",
                 mode: FileMode.CreateNew,
                 access: FileAccess.ReadWrite,
                 share: FileShare.None,
@@ -28,10 +36,24 @@ public sealed class Database(SafeFileHandle fileHandle) : IDisposable
         fileHandle.Dispose();
     }
 
-    public long WriteDocument(
-        int id,
-        ReadOnlySpan<byte> data,
-        long offset)
+    public long WriteIndex(int documentId, long documentOffset, long indexOffset)
+    {
+        // file layout
+        // |-------------|----------------------|
+        // | id (int 32) | data offset (int 64) |
+        // |-------------|----------------------|
+
+        var buffer = new byte[sizeof(int) + sizeof(long)].AsSpan();
+
+        BinaryPrimitives.WriteInt32(buffer[..4], documentId);
+        BinaryPrimitives.WriteInt64(buffer[4..], documentOffset);
+
+        RandomAccess.Write(indexHandle, buffer, indexOffset);
+
+        return indexOffset + buffer.Length;
+    }
+
+    public long WriteDocument(int id, ReadOnlySpan<byte> data, long offset)
     {
         // file layout
         // |-------------|----------------------|-----------------------|
@@ -57,6 +79,28 @@ public sealed class Database(SafeFileHandle fileHandle) : IDisposable
     public void FlushToDisk()
     {
         RandomAccess.FlushToDisk(fileHandle);
+        RandomAccess.FlushToDisk(indexHandle);
+    }
+
+    public async Task<Document?> FindByIdAsync(int id)
+    {
+        var documentOffsetMemory = new byte[8];
+
+        _ = await RandomAccess
+            .ReadAsync(indexHandle, documentOffsetMemory, 12 * (id - 1) + 4)
+            .ConfigureAwait(false);
+
+        var documentBuffer = new byte[4 + 2 + 1024];
+        var offset = BinaryPrimitives.ReadInt64(documentOffsetMemory.AsSpan());
+
+        _ = await RandomAccess
+            .ReadAsync(fileHandle, documentBuffer, offset);
+
+        var wrapper = new ReadOnlySequence<byte>(documentBuffer);
+
+        TryReadDocument(ref wrapper, out var document);
+
+        return document;
     }
 
     public async IAsyncEnumerable<Document> ScanAsync()
@@ -79,9 +123,10 @@ public sealed class Database(SafeFileHandle fileHandle) : IDisposable
         {
             var memory = writer.GetMemory(64 * 1024);
 
-            var bytesRead = (int)await RandomAccess
-                .ReadAsync(fileHandle, [memory], totalBytesRead)
-                .ConfigureAwait(false);
+            var bytesRead = (int)
+                await RandomAccess
+                    .ReadAsync(fileHandle, memory, totalBytesRead)
+                    .ConfigureAwait(false);
 
             if (bytesRead == 0)
                 break;
@@ -124,8 +169,9 @@ public sealed class Database(SafeFileHandle fileHandle) : IDisposable
     {
         var reader = new SequenceReader<byte>(buffer);
 
-        if (!reader.TryReadLittleEndian(out int id) ||
-            !reader.TryReadLittleEndian(out short length))
+        if (
+            !reader.TryReadLittleEndian(out int id) || !reader.TryReadLittleEndian(out short length)
+        )
         {
             document = null;
             return false;
