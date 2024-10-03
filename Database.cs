@@ -1,5 +1,4 @@
 using System.Buffers;
-using System.Data.Common;
 using LunaDB.Buffers;
 using Microsoft.Win32.SafeHandles;
 using System.IO.Pipelines;
@@ -25,13 +24,14 @@ public sealed class Database(SafeFileHandle fileHandle) : IDisposable
 
     public void Dispose()
     {
-        GC.SuppressFinalize(this);
-
         fileHandle.Close();
         fileHandle.Dispose();
     }
 
-    public long WriteDocument(int id, ReadOnlySpan<byte> data, long offset)
+    public long WriteDocument(
+        int id,
+        ReadOnlySpan<byte> data,
+        long offset)
     {
         // file layout
         // |-------------|----------------------|-----------------------|
@@ -59,7 +59,17 @@ public sealed class Database(SafeFileHandle fileHandle) : IDisposable
         RandomAccess.FlushToDisk(fileHandle);
     }
 
-    public record Document(int Id, ReadOnlyMemory<byte> Data);
+    public async IAsyncEnumerable<Document> ScanAsync()
+    {
+        var pipe = new Pipe();
+
+        var writing = FillPipeAsync(pipe.Writer);
+
+        await foreach (var document in ReadFromPipeAsync(pipe.Reader))
+            yield return document;
+
+        await writing.ConfigureAwait(false);
+    }
 
     private async Task FillPipeAsync(PipeWriter writer)
     {
@@ -69,29 +79,31 @@ public sealed class Database(SafeFileHandle fileHandle) : IDisposable
         {
             var memory = writer.GetMemory(64 * 1024);
 
-            var bytesRead = (int) await RandomAccess.ReadAsync(fileHandle, [memory], totalBytesRead);
-            
+            var bytesRead = (int)await RandomAccess
+                .ReadAsync(fileHandle, [memory], totalBytesRead)
+                .ConfigureAwait(false);
+
             if (bytesRead == 0)
                 break;
 
             totalBytesRead += bytesRead;
-            
+
             writer.Advance(bytesRead);
 
-            var result = await writer.FlushAsync();
+            var result = await writer.FlushAsync().ConfigureAwait(false);
 
             if (result.IsCompleted)
                 break;
         }
 
-        await writer.CompleteAsync();
+        await writer.CompleteAsync().ConfigureAwait(false);
     }
 
-    private async IAsyncEnumerable<Document> ReadFromPipe(PipeReader reader)
+    private static async IAsyncEnumerable<Document> ReadFromPipeAsync(PipeReader reader)
     {
         while (true)
         {
-            var result = await reader.ReadAsync();
+            var result = await reader.ReadAsync().ConfigureAwait(false);
             var buffer = result.Buffer;
 
             while (TryReadDocument(ref buffer, out var document))
@@ -105,7 +117,7 @@ public sealed class Database(SafeFileHandle fileHandle) : IDisposable
             }
         }
 
-        await reader.CompleteAsync();
+        await reader.CompleteAsync().ConfigureAwait(false);
     }
 
     private static bool TryReadDocument(ref ReadOnlySequence<byte> buffer, out Document? document)
@@ -128,24 +140,12 @@ public sealed class Database(SafeFileHandle fileHandle) : IDisposable
 
         // Read the record data
         var recordSlice = buffer.Slice(reader.Position, length);
-        
+
         document = new Document(Id: id, Data: recordSlice.First);
 
         // Move the buffer past the record
         buffer = buffer.Slice(recordSlice.End);
 
         return true;
-    }
-
-    public async IAsyncEnumerable<Document> ScanAsync()
-    {
-        var pipe = new Pipe();
-
-        var writing = FillPipeAsync(pipe.Writer);
-
-        await foreach (var document in ReadFromPipe(pipe.Reader))
-            yield return document;
-
-        await writing;
     }
 }
