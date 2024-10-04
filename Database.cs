@@ -83,7 +83,12 @@ public sealed class Database(SafeFileHandle fileHandle, SafeFileHandle indexHand
         RandomAccess.FlushToDisk(indexHandle);
     }
 
-    public async Task TombstoneAsync(int documentId)
+    public Task DeleteAsync(int documentId)
+    {
+        return TombstoneAsync(documentId);
+    }
+
+    private async Task TombstoneAsync(int documentId)
     {
         var indexEntryBuffer = new byte[8];
 

@@ -54,7 +54,7 @@ if (doc is not null)
         $"id {doc.Id}, data size is {doc.Data.Length} bytes, data [{System.Text.Encoding.UTF8.GetString(doc.Data.Span)}]"
     );
 
-await db.TombstoneAsync(1);
+await db.DeleteAsync(1);
 
 db.FlushToDisk();
 
