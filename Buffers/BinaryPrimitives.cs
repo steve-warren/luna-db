@@ -34,6 +34,6 @@ public static class BinaryPrimitives
     public static long ReadInt64(Span<byte> source) => MemoryMarshal.Read<long>(source);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static bool IsInt32ZeroedUnsafe(Span<byte> source)
+    public static bool UnsafeIsInt32EqualToZero(Span<byte> source)
         => (source[0] | source[1] | source[2] | source[3]) == 0;
 }

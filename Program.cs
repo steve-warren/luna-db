@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Text;
 using LunaDB;
 
 Console.WriteLine("starting lunadb...");
@@ -8,13 +9,21 @@ using var db = Database.Open("db");
 var documentOffset = 0L;
 var indexOffset = 0L;
 
-var json = Enumerable.Range(0, 1024).Select(x => (byte)61).ToArray();
+var json = Encoding.UTF8.GetBytes("""
+                          {
+                            "id": 1,
+                            "first_name": "Libbey",
+                            "last_name": "Claessens",
+                            "email": "lclaessens0@nyu.edu",
+                            "ip_address": "187.249.82.137"
+                          }
+                          """).AsMemory();
 var watch = Stopwatch.StartNew();
 
 for (var i = 1; i <= 1; i++)
 {
     indexOffset = db.WriteIndex(i, documentOffset, indexOffset);
-    documentOffset = db.WriteDocument(i, json, documentOffset);
+    documentOffset = db.WriteDocument(i, json.Span, documentOffset);
 }
 
 db.FlushToDisk();

@@ -85,22 +85,24 @@ public sealed class Database(SafeFileHandle fileHandle, SafeFileHandle indexHand
 
     public async Task TombstoneAsync(int documentId)
     {
-        var documentOffsetMemory = new byte[8];
+        var indexEntryBuffer = new byte[8];
 
         _ = await RandomAccess
-            .ReadAsync(indexHandle, documentOffsetMemory, 12 * (documentId - 1) + 4)
+            .ReadAsync(indexHandle, indexEntryBuffer, 12 * (documentId - 1) + 4)
             .ConfigureAwait(false);
 
         var documentBuffer = new byte[1];
-        var offset = BinaryPrimitives.ReadInt64(documentOffsetMemory.AsSpan());
+        var offset = BinaryPrimitives.ReadInt64(indexEntryBuffer.AsSpan());
 
         _ = await RandomAccess
             .ReadAsync(fileHandle, documentBuffer, offset + 4)
             .ConfigureAwait(false);
 
+        // bail if tombstone bit is already set
         if (documentBuffer[0] != 0)
             return;
 
+        // set the tombstone bit to 1
         documentBuffer[0] = 1;
 
         await RandomAccess
@@ -122,7 +124,7 @@ public sealed class Database(SafeFileHandle fileHandle, SafeFileHandle indexHand
             .ReadAsync(indexHandle, documentOffsetMemory, 12 * (documentId - 1))
             .ConfigureAwait(false);
 
-        if (BinaryPrimitives.IsInt32ZeroedUnsafe(documentOffsetMemory[..4].Span))
+        if (BinaryPrimitives.UnsafeIsInt32EqualToZero(documentOffsetMemory[..4].Span))
             return null;
 
         var offset = BinaryPrimitives.ReadInt64(documentOffsetMemory[4..].Span);
