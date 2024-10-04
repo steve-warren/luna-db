@@ -21,8 +21,8 @@ public static class BinaryPrimitives
         MemoryMarshal.Write<int>(destination, in value);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void WriteInt64(Span<byte> destionation, long value) =>
-        MemoryMarshal.Write<long>(destionation, in value);
+    public static void WriteInt64(Span<byte> destination, long value) =>
+        MemoryMarshal.Write<long>(destination, in value);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static short ReadInt16(Span<byte> source) => MemoryMarshal.Read<short>(source);
@@ -32,4 +32,8 @@ public static class BinaryPrimitives
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static long ReadInt64(Span<byte> source) => MemoryMarshal.Read<long>(source);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool IsInt32ZeroedUnsafe(Span<byte> source)
+        => (source[0] | source[1] | source[2] | source[3]) == 0;
 }

@@ -56,20 +56,21 @@ public sealed class Database(SafeFileHandle fileHandle, SafeFileHandle indexHand
     public long WriteDocument(int id, ReadOnlySpan<byte> data, long offset)
     {
         // file layout
-        // |-------------|----------------------|-----------------------|
-        // | id (int 32) | data length (int 16) | data (max 1 Kibibyte) |
-        // |-------------|----------------------|-----------------------|
+        // |-------------|-----------------|----------------------|-----------------------|
+        // | id (int 32) | tombstone (bit) | data length (int 16) | data (max 1 Kibibyte) |
+        // |-------------|-----------------|----------------------|-----------------------|
 
         const int OneKibibyte = 1024;
 
         if (data.Length > OneKibibyte)
             throw new ArgumentException("Data would be truncated.");
 
-        var buffer = new byte[sizeof(int) + sizeof(short) + data.Length].AsSpan();
+        var buffer = new byte[sizeof(int) + sizeof(short) + sizeof(byte) + data.Length].AsSpan();
 
         BinaryPrimitives.WriteInt32(buffer[..4], id);
-        BinaryPrimitives.WriteInt16(buffer[4..6], (short)data.Length);
-        data.CopyTo(buffer[6..]);
+        buffer[4] = 0;
+        BinaryPrimitives.WriteInt16(buffer[5..7], (short)data.Length);
+        data.CopyTo(buffer[7..]);
 
         RandomAccess.Write(fileHandle, buffer, offset);
 
@@ -82,16 +83,50 @@ public sealed class Database(SafeFileHandle fileHandle, SafeFileHandle indexHand
         RandomAccess.FlushToDisk(indexHandle);
     }
 
-    public async Task<Document?> FindByIdAsync(int id)
+    public async Task TombstoneAsync(int documentId)
     {
         var documentOffsetMemory = new byte[8];
 
         _ = await RandomAccess
-            .ReadAsync(indexHandle, documentOffsetMemory, 12 * (id - 1) + 4)
+            .ReadAsync(indexHandle, documentOffsetMemory, 12 * (documentId - 1) + 4)
             .ConfigureAwait(false);
 
-        var documentBuffer = new byte[4 + 2 + 1024];
+        var documentBuffer = new byte[1];
         var offset = BinaryPrimitives.ReadInt64(documentOffsetMemory.AsSpan());
+
+        _ = await RandomAccess
+            .ReadAsync(fileHandle, documentBuffer, offset + 4)
+            .ConfigureAwait(false);
+
+        if (documentBuffer[0] != 0)
+            return;
+
+        documentBuffer[0] = 1;
+
+        await RandomAccess
+            .WriteAsync(fileHandle, documentBuffer, offset + 4)
+            .ConfigureAwait(false);
+
+        var zero = new byte[sizeof(int)];
+
+        await RandomAccess
+            .WriteAsync(indexHandle, zero, 12 * (documentId - 1))
+            .ConfigureAwait(false);
+    }
+
+    public async Task<Document?> FindByIdAsync(int documentId)
+    {
+        var documentOffsetMemory = new byte[12].AsMemory();
+
+        _ = await RandomAccess
+            .ReadAsync(indexHandle, documentOffsetMemory, 12 * (documentId - 1))
+            .ConfigureAwait(false);
+
+        if (BinaryPrimitives.IsInt32ZeroedUnsafe(documentOffsetMemory[..4].Span))
+            return null;
+
+        var offset = BinaryPrimitives.ReadInt64(documentOffsetMemory[4..].Span);
+        var documentBuffer = new byte[4 + 1 + 2 + 1024];
 
         _ = await RandomAccess
             .ReadAsync(fileHandle, documentBuffer, offset);
@@ -157,9 +192,7 @@ public sealed class Database(SafeFileHandle fileHandle, SafeFileHandle indexHand
             reader.AdvanceTo(buffer.Start, buffer.End);
 
             if (result.IsCompleted)
-            {
                 break;
-            }
         }
 
         await reader.CompleteAsync().ConfigureAwait(false);
@@ -170,7 +203,9 @@ public sealed class Database(SafeFileHandle fileHandle, SafeFileHandle indexHand
         var reader = new SequenceReader<byte>(buffer);
 
         if (
-            !reader.TryReadLittleEndian(out int id) || !reader.TryReadLittleEndian(out short length)
+            !reader.TryReadLittleEndian(out int id) ||
+            !(reader.TryRead(out var tombstone) && tombstone == 0) ||
+            !reader.TryReadLittleEndian(out short length)
         )
         {
             document = null;
